@@ -20,14 +20,29 @@ export class Thread {
   private coroutines: Map<number, Coroutine> = new Map()
   private worker: IWorker
   private terminated = false
+  private idleTimestamp: number | null = null
 
   constructor(private workerFactory: IWorkerFactory) {
     this.worker = workerFactory.create()
     this.initWorker()
   }
 
+  getLastIdleTime() {
+    return this.idleTimestamp
+  }
+
+  private updateIdleTime(idle: boolean) {
+    if (idle) {
+      this.idleTimestamp = Date.now()
+    } else {
+      this.idleTimestamp = null
+    }
+  }
+
   async run(task: Task<unknown[]>) {
     if (this.terminated) throw new ConcurrencyError(ErrorMessage.ThreadTerminated)
+
+    this.updateIdleTime(false)
 
     const result = new Promise((resolve, reject) => {
       const channel = isInvocableTask(task.type) ? this.prepareChannelIfAny(task.type, task.data) : undefined
@@ -35,6 +50,7 @@ export class Thread {
         this.coroutines.delete(coroutine.id)
         if (error) reject(error)
         else resolve(result)
+        this.updateIdleTime(true)
       }, channel)
 
       if (channel) channel.init(this.worker, coroutine.id)
@@ -73,6 +89,7 @@ export class Thread {
       const coroutine = this.coroutines.get(coroutineId)
       if (!coroutine) throw new ConcurrencyError(ErrorMessage.CoroutineNotFound, coroutineId)
       coroutine.done(error as Error, result)
+      this.updateIdleTime(true)
     } else if (type === ThreadMessageType.DirectMessage) {
       const [coroutineId, message] = data as CoroutineMessage
       const coroutine = this.coroutines.get(coroutineId)

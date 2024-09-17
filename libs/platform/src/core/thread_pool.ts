@@ -9,6 +9,7 @@ export class ThreadPool {
   private turn = 0
   private threads: Thread[] = []
   private terminated = false
+  private idleCheckInterval: NodeJS.Timeout
 
   constructor(private workerFactory: IWorkerFactory, private settings: ThreadPoolSettings) {
     if (this.settings.minThreads) {
@@ -17,7 +18,7 @@ export class ThreadPool {
       }
     }
 
-    // TODO: descale
+    this.startIdleCheck()
   }
 
   config(settings: Partial<ThreadPoolSettings>) {
@@ -37,7 +38,28 @@ export class ThreadPool {
     return thread
   }
 
+  private startIdleCheck() {
+    this.idleCheckInterval = setInterval(async () => {
+      const now = Date.now()
+      const threadsToRemove: Thread[] = []
+
+      for (const thread of this.threads) {
+        // settings.threadIdleTimeout is in minutes, so multiply by 60 * 1000 to get milliseconds
+        if (now - thread.getLastIdleTime() > this.settings.threadIdleTimeout * 60 * 1000) {
+          if (this.threads.length > this.settings.minThreads) {
+            await thread.terminate()
+            threadsToRemove.push(thread)
+          }
+        }
+      }
+
+      // Remove terminated threads from the list
+      this.threads = this.threads.filter(thread => !threadsToRemove.includes(thread))
+    }, 60 * 1000) // check every minute
+  }
+
   async terminate(force = false) {
+    clearInterval(this.idleCheckInterval)
     for (let i = 0; i < this.threads.length; i++) {
       const thread = this.threads[i] as Thread
       await thread.terminate(force)

@@ -445,9 +445,21 @@ var Thread = class {
   coroutines = /* @__PURE__ */ new Map();
   worker;
   terminated = false;
+  idleTimestamp = null;
+  getLastIdleTime() {
+    return this.idleTimestamp;
+  }
+  updateIdleTime(idle) {
+    if (idle) {
+      this.idleTimestamp = Date.now();
+    } else {
+      this.idleTimestamp = null;
+    }
+  }
   async run(task) {
     if (this.terminated)
       throw new ConcurrencyError(ErrorMessage.ThreadTerminated);
+    this.updateIdleTime(false);
     const result = new Promise((resolve, reject) => {
       const channel = isInvocableTask(task.type) ? this.prepareChannelIfAny(task.type, task.data) : void 0;
       const coroutine = Coroutine.create((error, result2) => {
@@ -456,6 +468,7 @@ var Thread = class {
           reject(error);
         else
           resolve(result2);
+        this.updateIdleTime(true);
       }, channel);
       if (channel)
         channel.init(this.worker, coroutine.id);
@@ -490,6 +503,7 @@ var Thread = class {
       if (!coroutine)
         throw new ConcurrencyError(ErrorMessage.CoroutineNotFound, coroutineId);
       coroutine.done(error, result);
+      this.updateIdleTime(true);
     } else if (type === 2 /* DirectMessage */) {
       const [coroutineId, message] = data;
       const coroutine = this.coroutines.get(coroutineId);
@@ -546,10 +560,12 @@ var ThreadPool = class {
         this.addThread();
       }
     }
+    this.startIdleCheck();
   }
   turn = 0;
   threads = [];
   terminated = false;
+  idleCheckInterval;
   config(settings) {
     Object.assign(this.settings, settings);
   }
@@ -564,7 +580,23 @@ var ThreadPool = class {
     this.turn += 1;
     return thread;
   }
+  startIdleCheck() {
+    this.idleCheckInterval = setInterval(async () => {
+      const now = Date.now();
+      const threadsToRemove = [];
+      for (const thread of this.threads) {
+        if (now - thread.getLastIdleTime() > this.settings.threadIdleTimeout * 60 * 1e3) {
+          if (this.threads.length > this.settings.minThreads) {
+            await thread.terminate();
+            threadsToRemove.push(thread);
+          }
+        }
+      }
+      this.threads = this.threads.filter((thread) => !threadsToRemove.includes(thread));
+    }, 60 * 1e3);
+  }
   async terminate(force = false) {
+    clearInterval(this.idleCheckInterval);
     for (let i = 0; i < this.threads.length; i++) {
       const thread = this.threads[i];
       await thread.terminate(force);
